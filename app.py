@@ -3,77 +3,114 @@ from streamlit_gsheets import GSheetsConnection
 import pandas as pd
 from datetime import datetime
 import random
+import smtplib
+import re
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 # --- 1. PAGE SETUP ---
-st.set_page_config(
-    page_title="Badlands Fundraiser Portal", 
-    layout="wide", 
-    page_icon="🍕"
-)
+st.set_page_config(page_title="Badlands Fundraiser Portal", layout="wide", page_icon="🍕")
 
 # --- 2. DATABASE CONNECTION ---
 conn = st.connection("gsheets", type=GSheetsConnection)
-
-# 🛑 PASTE YOUR FULL URL HERE 🛑
 SHEET_URL = "https://docs.google.com/spreadsheets/d/18OsT6-V43pdzXiwVUv9GFoLddyuU9HOMrio717o6gmo/edit?gid=413428396#gid=413428396"
 
-# --- 3. DATA LOADING & SESSION STATE ---
-def get_data():
-    """Fetches data with a safety net to prevent the app from cutting off."""
+# --- 3. HELPERS: EMAIL VALIDATION & SENDING ---
+def is_valid_email(email):
+    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    return re.match(pattern, email)
+
+def send_confirmation_email(to_email, org_name, order_id, items, grand_total):
     try:
-        products = conn.read(spreadsheet=SHEET_URL, worksheet="Products", ttl=0)
-        orders = conn.read(spreadsheet=SHEET_URL, worksheet="Orders", ttl=0)
-        return products, orders
-    except Exception as e:
-        # This keeps the app running even if the sheet fails
-        return pd.DataFrame(columns=["Item Name", "Price"]), pd.DataFrame()
+        server = st.secrets["EMAIL_SERVER"]
+        port = int(st.secrets["EMAIL_PORT"])
+        sender_auth = st.secrets["EMAIL_SENDER"]
+        pwd = st.secrets["EMAIL_PASSWORD"]
+        
+        msg = MIMEMultipart()
+        msg['From'] = f"Badlands Pizza Fundraiser <NoReply@ssrr.co>" 
+        msg['To'] = to_email
+        msg['Subject'] = f"🍕 Order Receipt: {org_name} ({order_id})"
+        
+        rows = ""
+        for i in items:
+            rows += f"<tr><td style='padding:8px; border-bottom:1px solid #ddd;'>{i['Seller']}</td><td style='padding:8px; border-bottom:1px solid #ddd;'>{i['Product']}</td><td style='padding:8px; border-bottom:1px solid #ddd; text-align:center;'>{i['Qty']}</td><td style='padding:8px; border-bottom:1px solid #ddd; text-align:right;'>${i['Total']:.2f}</td></tr>"
 
-product_df, orders_db = get_data()
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; color: #333;">
+            <div style="max-width: 600px; margin: auto; border: 1px solid #eee; padding: 20px; border-radius: 10px;">
+                <h2 style="color: #d32f2f; text-align: center;">🍕 Badlands Pizza Fundraiser</h2>
+                <p>Hello <strong>{org_name}</strong>,</p>
+                <p>Thank you for your submission. Below is a summary of the order we received:</p>
+                <div style="background-color: #f9f9f9; padding: 10px; border-radius: 5px; margin-bottom: 20px;">
+                    <strong>Order ID:</strong> {order_id}<br>
+                    <strong>Date:</strong> {datetime.now().strftime("%B %d, %Y")}
+                </div>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <thead>
+                        <tr style="background-color: #d32f2f; color: white;">
+                            <th style="padding: 10px; text-align: left;">Seller</th>
+                            <th style="padding: 10px; text-align: left;">Item</th>
+                            <th style="padding: 10px; text-align: center;">Qty</th>
+                            <th style="padding: 10px; text-align: right;">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>{rows}</tbody>
+                </table>
+                <div style="text-align: right; margin-top: 20px; font-size: 18px;">
+                    <strong>Grand Total: <span style="color: #d32f2f;">${grand_total:.2f}</span></strong>
+                </div>
+                <p style="text-align: right; font-size: 14px; color: #666;">
+                    <em>Note: this is not an invoice. Other fees and charges may need to be applied.</em>
+                </p>
+                <hr style="border: 0; border-top: 1px solid #eee; margin-top: 30px;">
+                <p style="font-size: 12px; color: #888; text-align: center;">
+                    This is an automated receipt. <strong>Please do not reply to this email.</strong>
+                </p>
+            </div>
+        </body>
+        </html>"""
+        
+        msg.attach(MIMEText(html_body, 'html'))
+        smtp = smtplib.SMTP_SSL(server, port, timeout=10)
+        smtp.login(sender_auth, pwd)
+        smtp.sendmail(sender_auth, [to_email, sender_auth], msg.as_string())
+        smtp.quit()
+        return True
+    except Exception:
+        return False
 
-if 'current_items' not in st.session_state:
-    st.session_state.current_items = []
+# --- 4. DATA LOADING ---
+def get_data():
+    try:
+        p = conn.read(spreadsheet=SHEET_URL, worksheet="Products", ttl=300)
+        return p
+    except:
+        return pd.DataFrame(columns=["Item Name", "Price"])
 
-if 'active_order_id' not in st.session_state:
-    st.session_state.active_order_id = None
+product_df = get_data()
+
+if 'current_items' not in st.session_state: st.session_state.current_items = []
+if 'active_order_id' not in st.session_state: st.session_state.active_order_id = None
 
 st.title("🍕 Badlands Fundraiser Portal")
 
-# --- 4. STEP 1: ORGANIZATION & CONTACT INFO ---
+# --- 5. STEP 1: CONTACT INFO ---
 st.subheader("1. Organization & Contact Info")
-col1, col2 = st.columns(2)
-col3, col4 = st.columns(2)
-
-with col1:
-    org_name = st.text_input("Organization Name (e.g., Badlands Elementary)").strip()
-
-with col2:
-    owner_name = st.text_input("Order Contact Person")
-
-with col3:
-    owner_email = st.text_input("Contact Email")
-
-with col4:
-    if org_name:
-        if st.session_state.active_order_id is None:
-            if not orders_db.empty and 'Organization' in orders_db.columns:
-                org_column = orders_db['Organization'].fillna('').astype(str)
-                mask = org_column.str.lower() == org_name.lower()
-                
-                if mask.any():
-                    st.session_state.active_order_id = str(orders_db[mask]['Order_ID'].values[0])
-                else:
-                    st.session_state.active_order_id = f"ORD-{random.randint(1000, 9999)}"
-            else:
-                st.session_state.active_order_id = f"ORD-{random.randint(1000, 9999)}"
-        
-        order_id = st.text_input("Order ID", value=st.session_state.active_order_id, disabled=True)
-    else:
-        st.session_state.active_order_id = None
-        order_id = st.text_input("Order ID", value="Pending Org Name...", disabled=True)
+c1, c2 = st.columns(2)
+c3, c4 = st.columns(2)
+with c1: org_name = st.text_input("Organization Name").strip()
+with c2: owner_name = st.text_input("Order Contact Person")
+with c3: owner_email = st.text_input("Contact Email")
+with c4:
+    if org_name and st.session_state.active_order_id is None:
+        st.session_state.active_order_id = f"ORD-{random.randint(1000, 9999)}"
+    order_id = st.text_input("Order ID", value=st.session_state.active_order_id or "Pending...", disabled=True)
 
 st.divider()
 
-# --- 5. STEP 2: ADD SELLERS & ITEMS ---
+# --- 6. STEP 2: ADD SELLERS & ITEMS ---
 st.subheader("2. Add Sellers & Items")
 
 st.info("""
@@ -86,105 +123,89 @@ st.info("""
 
 with st.container(border=True):
     s_col1, s_col2, s_col3 = st.columns([2, 2, 1])
+    seller_input = s_col1.text_input("Seller Name")
+    item_list = product_df["Item Name"].tolist() if not product_df.empty else ["No Data Found"]
+    selected_item = s_col2.selectbox("Select Item", item_list)
+    qty = s_col3.number_input("Quantity", min_value=1, step=1)
+
+    btn_col1, btn_col2, buffer = st.columns([1, 1, 2])
     
-    with s_col1:
-        seller = st.text_input("Seller Name")
-    
-    with s_col2:
-        # If the sheet is empty or failing, we show a default message
-        if product_df.empty or "Item Name" not in product_df.columns:
-            st.error("⚠️ Connection Issue: 'Item Name' column not found in Google Sheet!")
-            item_list = ["Error: Check Sheet"]
+    if btn_col1.button("➕ Add Item", use_container_width=True, type="primary"):
+        if seller_input and org_name:
+            price_row = product_df[product_df["Item Name"] == selected_item]
+            if not price_row.empty:
+                val = float(price_row["Price"].values[0])
+                st.session_state.current_items.append({
+                    "Order_ID": st.session_state.active_order_id,
+                    "Seller": seller_input,
+                    "Product": selected_item,
+                    "Qty": qty,
+                    "Total": val * qty
+                })
+                st.rerun()
         else:
-            item_list = product_df["Item Name"].tolist()
-        
-        selected_item = st.selectbox("Select Item", item_list)
-    
-    with s_col3:
-        qty = st.number_input("Quantity", min_value=1, step=1)
+            st.warning("Please enter an Organization and Seller Name first.")
 
-    btn_col1, btn_col2 = st.columns([1, 4])
-    with btn_col1:
-        if st.button("➕ Add Item", use_container_width=True):
-            if seller and org_name and not product_df.empty:
-                try:
-                    unit_price = product_df.loc[product_df["Item Name"] == selected_item, "Price"].values[0]
-                    st.session_state.current_items.append({
-                        "Order_ID": st.session_state.active_order_id,
-                        "Organization": org_name,
-                        "Seller": seller,
-                        "Product": selected_item,
-                        "Qty": qty,
-                        "Total": float(unit_price * qty)
-                    })
-                except:
-                    st.error("Could not find price for this item.")
-            else:
-                st.warning("Please ensure Org Name and Seller Name are filled.")
-    
-    with btn_col2:
-        if st.button("🗑️ Clear Entire List", type="secondary"):
-            st.session_state.current_items = []
-            st.session_state.active_order_id = None
-            st.rerun()
+    if btn_col2.button("🧹 Clear Entire List", use_container_width=True):
+        st.session_state.current_items = []
+        st.rerun()
 
-# --- 6. STEP 3: REVIEW & FINAL SUBMISSION ---
+# --- 7. STEP 3: REVIEW & SUBMIT ---
 if st.session_state.current_items:
     st.divider()
-    st.write("### Current Order Summary")
-    
-    grand_total = sum(entry['Total'] for entry in st.session_state.current_items)
-    
-    for index, entry in enumerate(st.session_state.current_items):
-        c1, c2, c3, c4, c5 = st.columns([2, 2, 1, 1, 1])
-        c1.write(f"**Seller:** {entry['Seller']}")
-        c2.write(f"**Item:** {entry['Product']}")
-        c3.write(f"**Qty:** {entry['Qty']}")
-        c4.write(f"**Total:** ${entry['Total']:.2f}")
-        if c5.button("🗑️", key=f"delete_{index}"):
-            st.session_state.current_items.pop(index)
+    st.subheader("3. Review Order")
+    for idx, item in enumerate(st.session_state.current_items):
+        r1, r2, r3, r4, r5 = st.columns([2, 2, 1, 1, 1])
+        r1.write(f"**{item['Seller']}**")
+        r2.write(item['Product'])
+        r3.write(f"Qty: {item['Qty']}")
+        r4.write(f"${item['Total']:.2f}")
+        if r5.button("🗑️", key=f"del_{idx}"):
+            st.session_state.current_items.pop(idx)
             st.rerun()
 
-    st.write(f"### 💰 Grand Total: ${grand_total:.2f}")
-
-    st.markdown(
-        """
+    gt = sum(i['Total'] for i in st.session_state.current_items)
+    st.write(f"### 💰 Grand Total: ${gt:.2f}")
+    st.caption("Note: this is not an invoice. Other fees and charges may need to be applied.")
+    
+    st.markdown("""
         <div style="background-color: #ffeded; padding: 15px; border-radius: 10px; border: 2px solid #ff4b4b; margin-top: 20px;">
             <p style="color: #ff4b4b; font-size: 18px; font-weight: bold; margin-bottom: 0;">
-                🚨 ATTENTION: Once you click 'Finalize and Submit', this order is LOCKED. 
-                You will not be able to edit or delete these items from this portal after submission. 
+                🚨 ATTENTION: Once you click 'Finalize and Submit', this order is LOCKED and cannot be edited. 
+                Please verify all data before proceeding.
             </p>
         </div>
-        """, 
-        unsafe_allow_html=True
-    )
+        """, unsafe_allow_html=True)
     
-    st.write("") 
-    confirm_submit = st.checkbox("I verify that the information is correct and cannot be changed.")
+    confirm = st.checkbox("I verify that all information is correct.")
+    
+    if st.button("🚀 Finalize and Submit", type="primary", use_container_width=True, disabled=not confirm):
+        if not is_valid_email(owner_email):
+            st.error("❌ Please provide a valid email address to receive your receipt.")
+        else:
+            with st.spinner('🍕 Processing your order, updating records, and sending email...'):
+                try:
+                    receipt_email = owner_email
+                    d_df = pd.DataFrame(st.session_state.current_items)
+                    e_d = conn.read(spreadsheet=SHEET_URL, worksheet="Order_Details", ttl=0)
+                    conn.update(spreadsheet=SHEET_URL, worksheet="Order_Details", data=pd.concat([e_d, d_df]))
+                    
+                    l_o = conn.read(spreadsheet=SHEET_URL, worksheet="Orders", ttl=0)
+                    n_m = pd.DataFrame([{
+                        "Order_ID": st.session_state.active_order_id, 
+                        "Organization": org_name, 
+                        "Owner_Name": owner_name, 
+                        "Owner_Email": owner_email, 
+                        "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    }])
+                    conn.update(spreadsheet=SHEET_URL, worksheet="Orders", data=pd.concat([l_o, n_m]))
 
-    if st.button("🚀 Finalize and Submit", type="primary", use_container_width=True, disabled=not confirm_submit):
-        # Final Upload
-        try:
-            details_df = pd.DataFrame(st.session_state.current_items)
-            # Fetch existing to append
-            existing_details = conn.read(spreadsheet=SHEET_URL, worksheet="Order_Details", ttl=0)
-            conn.update(spreadsheet=SHEET_URL, worksheet="Order_Details", data=pd.concat([existing_details, details_df]))
-            
-            # Update Orders Master
-            latest_orders = conn.read(spreadsheet=SHEET_URL, worksheet="Orders", ttl=0)
-            if org_name.lower() not in latest_orders['Organization'].fillna('').astype(str).str.lower().values:
-                new_master = pd.DataFrame([{
-                    "Order_ID": st.session_state.active_order_id,
-                    "Organization": org_name,
-                    "Owner_Name": owner_name,
-                    "Owner_Email": owner_email,
-                    "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                }])
-                conn.update(spreadsheet=SHEET_URL, worksheet="Orders", data=pd.concat([latest_orders, new_master]))
-
-            st.success("Order Submitted Successfully!")
-            st.session_state.current_items = [] 
-            st.session_state.active_order_id = None
-            st.balloons()
-        except Exception as e:
-            st.error(f"Upload failed: {e}")
+                    send_confirmation_email(owner_email, org_name, st.session_state.active_order_id, st.session_state.current_items, gt)
+                    
+                    st.balloons()
+                    st.success(f"✅ Order Submitted! A receipt was sent to {receipt_email}.")
+                    st.session_state.current_items = []
+                    st.session_state.active_order_id = None
+                    
+                except Exception as e:
+                    st.error(f"Error: {e}")
